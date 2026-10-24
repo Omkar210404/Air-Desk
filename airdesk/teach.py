@@ -18,7 +18,7 @@ from .widgets import AMBER, MUTED, TEXT, VideoView, label
 
 SAMPLE_GAP_S = 0.12
 COUNTDOWN_S = 3.0
-BUILTIN_SHAPES = ("Point", "Pinch", "Two-finger pinch", "Two fingers", "Open palm", "Fist")
+BUILTIN_SHAPES = ("Point", "Pinch", "Right pinch", "Two fingers", "Open palm", "Fist")
 PLACEHOLDERS = {
     "keys": "e.g. ctrl+shift+m  or  win+shift+s",
     "open_app": r"e.g. notepad  or  C:\Program Files\App\app.exe",

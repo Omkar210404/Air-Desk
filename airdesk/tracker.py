@@ -161,10 +161,11 @@ class Tracker(QThread):
             h, w = rgb.shape[:2]
 
             # With no hand tracked, MediaPipe runs its heavier palm search on every frame.
-            # Searching on every other frame keeps the video at full frame rate.
+            # At 30 fps, searching on every other frame keeps the video smooth. When the
+            # camera itself is slow (dim light), there is time to search every frame.
             frame_no += 1
             hand, feats, match = None, None, None
-            if tracking or frame_no % 2 == 0:
+            if tracking or frame_no % 2 == 0 or (0 < fps < TARGET_FPS):
                 t0 = time.perf_counter()
                 rgb.flags.writeable = False
                 result = hands.process(rgb)

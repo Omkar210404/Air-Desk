@@ -24,7 +24,7 @@ CHEATSHEET = [
     ("Point with index", "Move cursor"),
     ("Quick pinch", "Left click"),
     ("Pinch and hold", "Drag"),
-    ("Thumb + two fingers", "Right click"),
+    ("Thumb + middle finger", "Right click"),
     ("Two fingers up/down", "Scroll"),
     ("Open palm swipe", "Prev / next slide"),
     ("Hold a fist", "Pause / resume"),

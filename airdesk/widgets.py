@@ -172,8 +172,8 @@ class VideoView(QWidget):
             p.drawEllipse(pt, rad * 2.2, rad * 2.2)
 
         out = self.frame.out
-        if out and out.label in ("Pinch", "Drag", "Two-finger pinch"):
-            mid = (pts[4] + pts[8]) / 2
+        if out and out.label in ("Pinch", "Drag", "Right pinch"):
+            mid = (pts[4] + (pts[12] if out.label == "Right pinch" else pts[8])) / 2
             ring = QColor("#ffffff")
             ring.setAlpha(200)
             p.setBrush(Qt.BrushStyle.NoBrush)

@@ -17,13 +17,17 @@ import numpy as np
 # Smaller than the frame so you can reach screen edges without leaving the view.
 CURSOR_BOX = (0.20, 0.12, 0.80, 0.68)
 DEAD_ZONE_PX = 4            # ignore cursor moves smaller than this (hand tremor)
-SMOOTH_MIN_CUTOFF = 1.0     # One Euro filter: lower = smoother when still
-SMOOTH_BETA = 0.004         # One Euro filter: higher = less lag when moving fast
+SMOOTH_MIN_CUTOFF = 1.6     # One Euro filter: lower = smoother when still
+SMOOTH_BETA = 0.012         # One Euro filter: higher = less lag when moving fast
 
 PINCH_ON, PINCH_OFF = 0.26, 0.36   # thumb-index tip distance / hand size
 PINCH_NEAR = 0.50           # cursor freezes as the fingers close, so clicks land where you aimed
-RPINCH_ON, RPINCH_OFF = 0.32, 0.40
-DRAG_HOLD_S = 0.40          # pinch longer than this becomes a drag
+RPINCH_ON, RPINCH_OFF = 0.26, 0.36  # thumb-middle tip distance / hand size (right click)
+CURLED_RATIO = 0.95         # a finger this bent (tip/joint distance from wrist) can't be pinching
+RPINCH_MIDDLE_MIN = 0.80    # middle finger bends to ~0.88 in a real right pinch; ~0.65 in a fist
+MIN_PINCH_S = 0.09          # shorter pinches are tracking flicker, not clicks
+RELEASE_S = 0.10            # a pinch must be open this long to count as let go (flicker guard)
+DRAG_HOLD_S = 0.75          # pinch longer than this becomes a drag (recorded clicks took 0.4-0.53 s)
 SCROLL_STEP = 0.03          # hand travel (fraction of frame height) per wheel notch
 SWIPE_DIST = 0.20           # fraction of frame width
 SWIPE_WINDOW_S = 0.35
@@ -58,6 +62,7 @@ def _clip01(x: float) -> float:
 class Hand:
     pts: np.ndarray            # (21, 2) image coords in 0..1, already mirrored
     ext: dict                  # finger -> 0..1, how straight it is
+    ratio: dict                # finger -> tip/middle-joint distance from wrist (raw)
     pinch: float               # thumb tip to index tip, in hand sizes
     pinch_mid: float           # thumb tip to middle tip
     tips_im: float             # index tip to middle tip
@@ -75,14 +80,15 @@ def analyse(lm: np.ndarray, aspect: float, score: float = 1.0) -> Hand:
     def d(a: int, b: int) -> float:
         return float(np.linalg.norm(p[a] - p[b]))
 
-    ext = {}
+    ext, ratios = {}, {}
     for name, (pip, tip) in FINGERS.items():
         # A straight finger's tip is clearly farther from the wrist than its middle joint.
         ratio = d(0, tip) / (d(0, pip) + 1e-6)
+        ratios[name] = ratio
         ext[name] = _sig((ratio - 1.12) / 0.06)
     lm2 = np.asarray(lm, dtype=np.float64)[:, :2]
     palm = lm2[[0, 5, 9, 13, 17]].mean(axis=0)
-    return Hand(lm2, ext, d(4, 8) / size, d(4, 12) / size, d(8, 12) / size, palm, score)
+    return Hand(lm2, ext, ratios, d(4, 8) / size, d(4, 12) / size, d(8, 12) / size, palm, score)
 
 
 class OneEuro:
@@ -151,6 +157,9 @@ class GestureEngine:
         self.drag_offset = np.zeros(2)
         self.block_pinch = False
         self.rclick_fired = False
+        self.rpinch_since = None
+        self.pinch_off_since = None
+        self.rpinch_off_since = None
         self.scroll_ref = None
         self.palm_hist: deque = deque()
         self.last_open = -1e9
@@ -177,21 +186,32 @@ class GestureEngine:
         return np.array([u * (self.sw - 1), v * (self.sh - 1)])
 
     def _classify(self, h: Hand):
-        if self.pinch_on:
-            self.pinch_on = h.pinch < PINCH_OFF
-        else:
-            self.pinch_on = h.pinch < PINCH_ON
-        rp = max(h.pinch, h.pinch_mid)
+        i, m, r, p = (h.ext[k] for k in ("index", "middle", "ring", "pinky"))
+        # In a fist the thumb rests on the fingertips, which looks like a pinch.
+        # Measured on a real recording: fist index ratio ~0.77, pinching index ~1.2.
+        fist = max(i, m, r, p) < 0.3
+        index_up = h.ratio["index"] > CURLED_RATIO
+        middle_up = h.ratio["middle"] > RPINCH_MIDDLE_MIN
+        # A thumb resting on the middle finger of a relaxed, half-closed hand is not a right
+        # click. In the recordings, a deliberate right pinch kept ring or pinky up (~1.27),
+        # a relaxed hand had both curled (~0.8).
+        others_up = max(h.ratio["ring"], h.ratio["pinky"]) > CURLED_RATIO
+
+        # Right click: thumb on the middle fingertip.
         if self.rpinch_on:
-            self.rpinch_on = rp < RPINCH_OFF
-        else:   # index and middle must touch each other too, not just a curled middle finger
-            self.rpinch_on = rp < RPINCH_ON and h.tips_im < 0.30
+            self.rpinch_on = h.pinch_mid < RPINCH_OFF and middle_up and not fist
+        else:
+            self.rpinch_on = h.pinch_mid < RPINCH_ON and middle_up and others_up and not fist
+        # Left click / drag: thumb on the index fingertip.
+        if self.pinch_on:
+            self.pinch_on = h.pinch < PINCH_OFF and index_up and not fist
+        else:
+            self.pinch_on = h.pinch < PINCH_ON and index_up and not fist and not self.rpinch_on
 
         if self.rpinch_on:
-            return "Two-finger pinch", _clip01((0.5 - rp) / 0.3)
+            return "Right pinch", _clip01((0.5 - h.pinch_mid) / 0.3)
         if self.pinch_on:
             return "Pinch", _clip01((0.5 - h.pinch) / 0.3)
-        i, m, r, p = (h.ext[k] for k in ("index", "middle", "ring", "pinky"))
         poses = {
             "Fist": min(1 - i, 1 - m, 1 - r, 1 - p),
             "Open palm": min(i, m, r, p),
@@ -334,25 +354,39 @@ class GestureEngine:
     def _mouse_gestures(self, h: Hand, label: str, t: float, out: Output) -> bool:
         """Clicks, right click, drag and scroll. Returns True while dragging."""
         target = self._map(h.pts[8])
-        # Right click: thumb touches index and middle together (fires once per pinch).
+        # Right click: thumb on the middle fingertip (fires once per pinch).
         if self.rpinch_on:
             if self.dragging:
                 out.actions.append(("up",))
                 self.dragging = False
-            if not self.rclick_fired and self._ready("rclick", t):
+            if self.rpinch_since is None:
+                self.rpinch_since = t
+            if (not self.rclick_fired and t - self.rpinch_since >= MIN_PINCH_S
+                    and self._ready("rclick", t)):
                 out.actions.append(("rclick",))
                 out.event = "Right click"
                 self.rclick_fired = True
             self.block_pinch = True        # don't turn the release into a left click
             self.pinch_since = None
-        else:
-            self.rclick_fired = False
+            self.rpinch_off_since = None
+        elif self.rpinch_since is not None:
+            if self.rpinch_off_since is None:
+                self.rpinch_off_since = t
+            if t - self.rpinch_off_since >= RELEASE_S:
+                self.rclick_fired = False
+                self.rpinch_since = None
 
-        # Left pinch: short = click, held = drag.
-        if self.pinch_on and not self.rpinch_on and not self.block_pinch:
+        # Left pinch: short = click, held = drag. A one-frame gap mid-pinch is ignored.
+        if self.pinch_on and not self.rpinch_on:
+            self.pinch_off_since = None
+        elif self.pinch_since is not None and self.pinch_off_since is None:
+            self.pinch_off_since = t
+        holding = (self.pinch_since is not None and self.pinch_off_since is not None
+                   and t - self.pinch_off_since < RELEASE_S)
+        if (self.pinch_on and not self.rpinch_on and not self.block_pinch) or holding:
             if self.pinch_since is None:
                 self.pinch_since = t
-            if not self.dragging and t - self.pinch_since >= DRAG_HOLD_S:
+            if not self.dragging and self.pinch_on and t - self.pinch_since >= DRAG_HOLD_S:
                 out.actions.append(("down",))
                 out.event = "Drag"
                 self.dragging = True
@@ -360,12 +394,12 @@ class GestureEngine:
                 self.drag_offset = anchor - target
             if self.dragging:
                 out.label = "Drag"
-        elif self.pinch_since is not None and not self.pinch_on:
+        elif self.pinch_since is not None:
             if self.dragging:
                 out.actions.append(("up",))
                 out.event = "Drop"
                 self.dragging = False
-            elif self._ready("click", t):
+            elif self.pinch_off_since - self.pinch_since >= MIN_PINCH_S and self._ready("click", t):
                 out.actions.append(("click",))
                 out.event = "Click"
             self.pinch_since = None

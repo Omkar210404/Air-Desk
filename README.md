@@ -13,8 +13,8 @@ Control your computer with hand gestures through an ordinary webcam, including g
   |---|---|
   | Point with your index finger | Move the cursor (smoothed, small dead zone) |
   | Quick pinch (thumb + index) | Left click |
-  | Pinch and hold | Drag |
-  | Thumb touching index + middle | Right click |
+  | Pinch and hold (about 0.75 s) | Drag |
+  | Thumb on middle fingertip, ring/pinky relaxed open | Right click |
   | Two fingers up, move hand up/down | Scroll |
   | Open palm, swipe left / right | Previous / next slide (arrow keys) |
   | Hold a fist | Pause / resume all control |
@@ -70,13 +70,19 @@ Use `python -m airdesk --camera 1` to pick another camera.
 
 ## Performance
 
-Measured on the development laptop (12-thread CPU, webcam over DirectShow): the live view runs at 30 fps. With no hand in view, each palm search takes about 20 ms. It runs on every other frame so the video stays at 30 fps. Timing with a hand tracked hasn't been measured yet.
+Measured on the development laptop (12-thread CPU, webcam over DirectShow):
+
+- **MediaPipe:** about 18 ms per frame with a hand tracked (9 ms with the lighter model), and about 20 ms per palm search with no hand in view.
+- **Camera:** in good light the webcam delivered 30 fps. In dimmer room light it dropped to 15 fps, because it lengthens exposure, and that was the main source of lag. Forcing a short exposure gave 30 fps but an almost black image, so AirDesk leaves exposure on automatic and suggests more light instead.
+- **Hand search:** at 30 fps it runs on every other frame; when the camera is slower, it runs on every frame.
 
 Capture and inference run on a background thread. If frames drop below 24 fps while a hand is tracked and processing is the bottleneck, AirDesk steps down resolution and model size by itself.
 
 ## Limits
 
-- **No published accuracy.** Neither the built-in gestures nor any custom gesture has been measured across several people. The thresholds (pinch distance, swipe speed, smoothing) are reasonable defaults and may need tuning for your hand and camera; they are at the top of `airdesk/gestures.py`.
+- **No published accuracy.** Neither the built-in gestures nor any custom gesture has been measured across several people.
+  - The built-in thresholds were tuned on two recording sessions from **one person** (about 1,500 frames of landmark numbers, no images). For example, a fist used to be mistaken for a pinch, and natural clicks lasting 0.4–0.53 s were turning into drags.
+  - On a different hand or camera they may need adjusting. They are at the top of `airdesk/gestures.py`.
 - **Single-camera hand tracking breaks down** in dim light, against busy backgrounds, with fast motion, and when fingers hide each other (side-on pinches).
 - **One hand at a time**, primary monitor only.
 - **Gestures depend on orientation.** Custom gestures aren't rotation-normalised: a gesture taught upright may not match when your hand is tilted far.
