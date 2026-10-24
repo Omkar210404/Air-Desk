@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.claude/
+.env
+.env.*
+# never commit recordings or models trained on someone's hand
+recordings/
+*.joblib
+*.pkl
+*.npz
+airdesk_config.json
+.DS_Store
+Thumbs.db

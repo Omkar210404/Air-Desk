@@ -1,0 +1,9 @@
+# Python 3.11. mediapipe 0.10.21 is the last release that bundles the Hands model
+# (mp.solutions), so nothing is downloaded at runtime. It pulls in opencv-contrib-python.
+mediapipe==0.10.21
+opencv-contrib-python==4.11.0.86
+numpy==1.26.4
+protobuf==4.25.9
+scikit-learn==1.9.1
+pynput==1.8.2
+PyQt6==6.11.0
