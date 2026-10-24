@@ -4,7 +4,8 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="airdesk", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="airdesk", description="Control your computer with hand gestures from a webcam.")
     parser.add_argument("--camera", type=int, default=0, help="camera number (default 0)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

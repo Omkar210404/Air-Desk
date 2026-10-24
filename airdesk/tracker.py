@@ -15,6 +15,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage
 
 from .control import SystemControl
+from .custom import features
 from .gestures import GestureEngine, Output, analyse
 
 # Quality levels, best first: (processing width, MediaPipe model complexity, capture size).
@@ -48,10 +49,15 @@ class Frame:
     quality: str = ""
     error: tuple | None = None              # (title, body) when there is no video
     warning: str = ""
+    features: np.ndarray | None = None      # normalised landmarks, for teaching
+    builtin: str = ""                       # what the built-in rules see (before custom)
+    match: tuple | None = None              # (name, confidence) of a taught gesture
 
 
 class Tracker(QThread):
     frame = pyqtSignal(object)
+    custom = pyqtSignal(str)                # a taught gesture fired
+
 
     def __init__(self, camera_index: int, screen: tuple[int, int]):
         super().__init__()
@@ -59,6 +65,8 @@ class Tracker(QThread):
         self.engine = GestureEngine(*screen)
         self.control = SystemControl()
         self.control_on = False
+        self.teaching = False                # Teach window open: watch, never act
+        self.custom_model = None             # replaced as a whole by the UI thread
         self.level = 0
         self._stop = False
 
@@ -155,7 +163,7 @@ class Tracker(QThread):
             # With no hand tracked, MediaPipe runs its heavier palm search on every frame.
             # Searching on every other frame keeps the video at full frame rate.
             frame_no += 1
-            hand = None
+            hand, feats, match = None, None, None
             if tracking or frame_no % 2 == 0:
                 t0 = time.perf_counter()
                 rgb.flags.writeable = False
@@ -165,17 +173,25 @@ class Tracker(QThread):
                 if result.multi_hand_landmarks:
                     lm = np.array([[p.x, p.y, p.z]
                                    for p in result.multi_hand_landmarks[0].landmark])
-                    score = result.multi_handedness[0].classification[0].score
-                    hand = analyse(lm, w / h, score)
+                    handed = result.multi_handedness[0].classification[0]
+                    hand = analyse(lm, w / h, handed.score)
+                    feats = features(lm, w / h, handed.label)
+                    model = self.custom_model
+                    if model is not None:
+                        match = model.predict(feats)
                     window_tracked += 1
                     window_proc += spent
                 tracking = hand is not None
 
             now = time.perf_counter()
-            out = self.engine.update(hand, now, self.control_on)
+            out = self.engine.update(hand, now, self.control_on and not self.teaching, match)
+            builtin = self.engine.builtin if hand is not None else ""
             if out.actions:
                 self.control.run(out.actions)
-            if not self.control_on:
+                for action in out.actions:
+                    if action[0] == "custom":
+                        self.custom.emit(action[1])
+            if not self.control_on or self.teaching:
                 self.control.release()
 
             if last_t is not None:                 # average frame gaps, not rates
@@ -209,7 +225,8 @@ class Tracker(QThread):
             image = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
             pts = self.engine.last_pts
             self.frame.emit(Frame(image, pts, out, fps, proc_ms,
-                                  f"{w}×{h} · model {complexity}", None, warning))
+                                  f"{w}×{h} · model {complexity}", None, warning,
+                                  feats, builtin, match))
 
         if cap is not None:
             cap.release()

@@ -31,6 +31,8 @@ FIST_HOLD_S = 0.6
 ARM_DELAY_S = 0.35          # hand must be steady this long before control starts
 LOST_GRACE_S = 0.15         # ride out a frame or two where tracking blinks
 COOLDOWN = {"click": 0.20, "rclick": 0.6, "swipe": 0.9, "fist": 1.0}
+CUSTOM_HOLD_S = 0.5         # hold a taught gesture this long to fire it
+CUSTOM_COOLDOWN_S = 1.0
 
 FINGERS = {"index": (6, 8), "middle": (10, 12), "ring": (14, 16), "pinky": (18, 20)}
 
@@ -121,7 +123,8 @@ class Output:
     confidence: float = 0.0
     actions: list = field(default_factory=list)
     event: str = ""            # short message to flash, e.g. "Click"
-    hold: float = 0.0          # 0..1 progress of a fist hold
+    hold: float = 0.0          # 0..1 progress of a fist or custom-gesture hold
+    laser: tuple | None = None # presenter mode: laser dot position on screen
 
 
 class GestureEngine:
@@ -129,10 +132,12 @@ class GestureEngine:
         self.sw, self.sh = screen_w, screen_h
         self.filter = OneEuro(SMOOTH_MIN_CUTOFF, SMOOTH_BETA)
         self.paused = False
+        self.presenter = False     # pointing drives a laser dot; no clicks or scrolling
         self.cursor = None
         self._last: dict = {}
         self.dragging = False
         self.last_pts = None       # landmarks to draw (kept through short dropouts)
+        self.builtin = ""
         self.last_seen = -1e9
         self._held_out = Output()
         self.reset_hand()
@@ -151,11 +156,16 @@ class GestureEngine:
         self.last_open = -1e9
         self.fist_since = None
         self.fist_latched = False
+        self.custom_name = None
+        self.custom_since = 0.0
+        self.custom_fired = False
+        self.custom_last = None
+        self.custom_seen = -1e9
         self.filter.reset()
 
-    def _ready(self, name: str, t: float) -> bool:
+    def _ready(self, name: str, t: float, cooldown: float | None = None) -> bool:
         """Cooldown gate: True (and starts the cooldown) if `name` may fire now."""
-        if t - self._last.get(name, -1e9) < COOLDOWN[name]:
+        if t - self._last.get(name, -1e9) < (COOLDOWN[name] if cooldown is None else cooldown):
             return False
         self._last[name] = t
         return True
@@ -194,7 +204,8 @@ class GestureEngine:
         return label, poses[label]
 
     # -- main entry ---------------------------------------------------------
-    def update(self, hand: Hand | None, t: float, enabled: bool) -> Output:
+    def update(self, hand: Hand | None, t: float, enabled: bool, custom=None) -> Output:
+        """`custom` is (name, confidence) when a taught gesture matches this frame."""
         out = Output()
         if hand is None and self.hand_since is not None and t - self.last_seen < LOST_GRACE_S:
             held = self._held_out
@@ -213,6 +224,18 @@ class GestureEngine:
             self.hand_since = t
         label, conf = self._classify(hand)
         out.label, out.confidence = label, conf * hand.score
+        self.builtin = label        # what the built-in rules see, before any custom match
+
+        # A taught gesture outranks the built-in ones while it is shown.
+        if custom is not None:
+            self.custom_last, self.custom_seen = custom, t
+        elif self.custom_last is not None and t - self.custom_seen < LOST_GRACE_S:
+            custom = self.custom_last
+        else:
+            self.custom_last = None
+        if custom is not None:
+            label = out.label = custom[0]
+            out.confidence = custom[1]
 
         # Fist = pause / resume. Works while paused, so it can always undo itself.
         if label == "Fist":
@@ -244,14 +267,73 @@ class GestureEngine:
             return out
 
         out.status = "active"
-        self._act(hand, label, t, out)
+        self._act(hand, label, t, out, custom is not None)
         self._held_out = out
         return out
 
-    def _act(self, h: Hand, label: str, t: float, out: Output):
+    def _release_drag(self, out: Output):
+        if self.dragging:
+            out.actions.append(("up",))
+            self.dragging = False
+        self.pinch_since = None
+
+    def _custom(self, name: str, t: float, out: Output):
+        if self.custom_name != name:
+            self.custom_name, self.custom_since, self.custom_fired = name, t, False
+        if self.custom_fired:
+            return
+        held = t - self.custom_since
+        out.hold = _clip01(held / CUSTOM_HOLD_S)
+        if held >= CUSTOM_HOLD_S and self._ready("custom:" + name, t, CUSTOM_COOLDOWN_S):
+            out.actions.append(("custom", name))
+            out.event = name
+            self.custom_fired = True
+
+    def _act(self, h: Hand, label: str, t: float, out: Output, is_custom: bool):
         target = self._map(h.pts[8])
         move = False
 
+        if is_custom:
+            self._release_drag(out)
+            self.scroll_ref = None
+            self.palm_hist.clear()
+            self._custom(label, t, out)
+            if self.cursor is not None:
+                self.filter.reset(self.cursor, t)
+            return
+        self.custom_name = None
+
+        if self.presenter:          # no clicks, drags or scrolling during a talk
+            self._release_drag(out)
+            self.scroll_ref = None
+        else:
+            move = self._mouse_gestures(h, label, t, out)
+            if move:
+                target = target + self.drag_offset
+
+        self._swipe(h, label, t, out)
+
+        # Cursor (or laser) follows the index tip while pointing, not while closing a pinch.
+        if (not move and h.ext["index"] > 0.5 and label in ("Point", "Hand")
+                and h.pinch > PINCH_NEAR):
+            move = True
+
+        if move and self.presenter:
+            f = self.filter(target, t)
+            self.cursor = f
+            out.laser = (float(f[0]), float(f[1]))
+        elif move:
+            f = self.filter(target, t)
+            if self.cursor is None or np.linalg.norm(f - self.cursor) >= DEAD_ZONE_PX:
+                self.cursor = f
+                out.actions.append(("move", int(round(f[0])), int(round(f[1]))))
+        elif self.cursor is not None:
+            # Hold the filter at the frozen cursor so resuming glides instead of jumping.
+            self.filter.reset(self.cursor, t)
+
+    def _mouse_gestures(self, h: Hand, label: str, t: float, out: Output) -> bool:
+        """Clicks, right click, drag and scroll. Returns True while dragging."""
+        target = self._map(h.pts[8])
         # Right click: thumb touches index and middle together (fires once per pinch).
         if self.rpinch_on:
             if self.dragging:
@@ -277,8 +359,6 @@ class GestureEngine:
                 anchor = self.cursor if self.cursor is not None else target
                 self.drag_offset = anchor - target
             if self.dragging:
-                target = target + self.drag_offset
-                move = True
                 out.label = "Drag"
         elif self.pinch_since is not None and not self.pinch_on:
             if self.dragging:
@@ -304,8 +384,10 @@ class GestureEngine:
                 self.scroll_ref -= steps * SCROLL_STEP
         else:
             self.scroll_ref = None
+        return self.dragging
 
-        # Swipe: open palm moved quickly sideways.
+    def _swipe(self, h: Hand, label: str, t: float, out: Output):
+        """Open palm moved quickly sideways = previous / next slide."""
         if label == "Open palm":
             self.last_open = t
             self.palm_hist.append((t, float(h.palm[0]), float(h.palm[1])))
@@ -320,17 +402,3 @@ class GestureEngine:
                 self.palm_hist.clear()
         elif t - self.last_open > 0.15:     # tolerate a frame or two of motion blur
             self.palm_hist.clear()
-
-        # Cursor follows the index tip while pointing (not while closing a pinch).
-        if (not move and h.ext["index"] > 0.5 and label in ("Point", "Hand")
-                and h.pinch > PINCH_NEAR):
-            move = True
-
-        if move:
-            f = self.filter(target, t)
-            if self.cursor is None or np.linalg.norm(f - self.cursor) >= DEAD_ZONE_PX:
-                self.cursor = f
-                out.actions.append(("move", int(round(f[0])), int(round(f[1]))))
-        elif self.cursor is not None:
-            # Hold the filter at the frozen cursor so resuming glides instead of jumping.
-            self.filter.reset(self.cursor, t)
