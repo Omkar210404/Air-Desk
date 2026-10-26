@@ -2,11 +2,9 @@
 
 Control your computer with hand gestures through an ordinary webcam, including gestures you teach it yourself. Everything runs on your machine: no cloud, no account, no network calls.
 
-> **Demo GIF:** not recorded yet. It will go here.
-
 ## What it does
 
-- **Live view**: a mirrored webcam feed with a glowing hand skeleton, the detected gesture and a confidence bar.
+- **Live view**: a mirrored webcam feed with a glowing hand skeleton, the detected gesture and a confidence bar. A **Hide camera image** switch shows only the skeleton on a dark background, so screen recordings and calls don't show you or your room.
 - **Built-in gestures** (rules on MediaPipe's 21 hand landmarks, no training needed):
 
   | Gesture | Action |

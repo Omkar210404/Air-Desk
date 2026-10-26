@@ -92,6 +92,7 @@ class VideoView(QWidget):
         self.frame = Frame()
         self.status = "off"
         self.event, self.event_t = "", 0.0
+        self.hide_image = False     # privacy view: skeleton only, no camera picture
         self.setMinimumSize(480, 300)
 
     def show_frame(self, frame: Frame, status: str):
@@ -126,7 +127,13 @@ class VideoView(QWidget):
 
         p.save()
         p.setClipPath(clip)
-        p.drawImage(r, self.frame.image)
+        if self.hide_image:
+            bg = QLinearGradient(r.topLeft(), r.bottomRight())
+            bg.setColorAt(0.0, QColor("#1a1f2b"))
+            bg.setColorAt(1.0, QColor("#0e1118"))
+            p.fillRect(r, bg)
+        else:
+            p.drawImage(r, self.frame.image)
         shade = QLinearGradient(r.topLeft(), r.bottomLeft())
         shade.setColorAt(0.0, QColor(0, 0, 0, 70))
         shade.setColorAt(0.5, QColor(0, 0, 0, 20))

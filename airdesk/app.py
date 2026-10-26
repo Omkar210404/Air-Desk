@@ -167,6 +167,14 @@ class MainWindow(QMainWindow):
         teach.clicked.connect(lambda: self.open_teach(None))
         row.addWidget(teach)
         v.addLayout(row)
+        self.hide_camera = QPushButton("Hide camera image (skeleton only)")
+        self.hide_camera.setCheckable(True)
+        self.hide_camera.setToolTip("Shows only the hand skeleton, not you or your room. "
+                                    "Handy for screen recordings and calls.")
+        self.hide_camera.setChecked(bool(self.config.get("hide_camera", False)))
+        self.video.hide_image = self.hide_camera.isChecked()
+        self.hide_camera.toggled.connect(self.set_hide_camera)
+        v.addWidget(self.hide_camera)
 
         mine = card()
         self.mine = QVBoxLayout(mine)
@@ -298,6 +306,7 @@ class MainWindow(QMainWindow):
             self.teach.raise_()
             return
         self.teach = TeachDialog(self, self.config["gestures"], existing)
+        self.teach.video.hide_image = self.hide_camera.isChecked()
         self.teach.saved.connect(self._gesture_saved)
         self.teach.finished.connect(self._teach_closed)
         self.tracker.teaching = True
@@ -393,6 +402,19 @@ class MainWindow(QMainWindow):
         else:
             self.indicator.hide()
             self.laser.hide()
+
+    def set_hide_camera(self, on: bool):
+        self.video.hide_image = on
+        if self.teach is not None:
+            self.teach.video.hide_image = on
+        if on:
+            self.config["hide_camera"] = True
+        else:
+            self.config.pop("hide_camera", None)
+        try:
+            save_config(self.config)
+        except OSError:
+            pass                    # only a preference; the switch still works this session
 
     def set_presenter(self, on: bool):
         self.tracker.engine.presenter = on
