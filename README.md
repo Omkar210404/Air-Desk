@@ -20,6 +20,11 @@ Control your computer with hand gestures through an ordinary webcam, including g
   | Hold a fist | Pause / resume all control |
 
 - **Teach your own gestures**: name a gesture, show it for 20 samples, and AirDesk trains a small k-nearest-neighbours classifier on the spot. You then map it to a shortcut (`ctrl+shift+m`, `win+shift+s`, ...), mute, volume up/down, play/pause, next/previous track, a screenshot, an app or file, or a website.
+- **Customise every built-in gesture**: each one in the side panel has a *Customise* button.
+  - Keep the default action, switch it to any other action (a shortcut, media key, screenshot, app or website), or turn it off.
+  - Two fingers can control volume instead of scrolling.
+  - Adjust the sensitivity: cursor feel (smooth / balanced / fast), how long to hold before a drag starts, scroll speed, swipe length, and fist hold time.
+  - The fist always stays the safety pause; only its hold time can change.
 - **Presenter mode**: large gesture hints at the bottom of the screen and a red laser dot that follows your index finger. Both are click-through overlays. Pinch and scroll are switched off so they can't disturb a slideshow; swipes still change slides.
 - **Safety**:
   - Control starts **OFF**.
@@ -56,7 +61,7 @@ Use `python -m airdesk --camera 1` to pick another camera.
 ## What is stored, and where
 
 - Camera frames are never written to disk.
-- Taught gestures are saved to `~/.airdesk/config.json`. Each sample is 60 numbers (landmark positions relative to the wrist and divided by hand size), not an image. The kNN "model" is those samples, and it is rebuilt in milliseconds at start-up.
+- Taught gestures and built-in gesture settings are saved to `~/.airdesk/config.json`. Each sample is 60 numbers (landmark positions relative to the wrist and divided by hand size), not an image. The kNN "model" is those samples, and it is rebuilt in milliseconds at start-up.
 - The *Screenshot* action saves PNGs to `~/Pictures/AirDesk/`.
 
 ## How custom gestures work
@@ -98,7 +103,7 @@ airdesk/
   tracker.py    camera + MediaPipe on a background thread, adaptive quality
   gestures.py   landmark features, built-in gesture rules, cursor smoothing
   custom.py     taught-gesture features, kNN classifier, held-out check, config file
-  teach.py      Teach window
+  teach.py      Teach window and Customise window
   control.py    mouse/keyboard via pynput, shortcut parsing, global hotkey
   widgets.py    dark theme, live view, status pill, presenter overlays
 ```

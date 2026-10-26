@@ -1,4 +1,4 @@
-"""Teach window: record a gesture, check it on held-out samples, map it to an action."""
+"""Teach and Customise windows: record gestures, map gestures to actions."""
 from __future__ import annotations
 
 import os
@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout, QLine
 
 from .control import ACTION_TYPES, parse_combo
 from .custom import SAMPLES_PER_GESTURE, CustomModel, holdout_check, round_sample
+from .gestures import BUILTINS, LEVELS, level_key
 from .tracker import Frame
 from .widgets import AMBER, MUTED, TEXT, VideoView, label
 
@@ -24,6 +25,166 @@ PLACEHOLDERS = {
     "open_app": r"e.g. notepad  or  C:\Program Files\App\app.exe",
     "open_url": "e.g. https://github.com",
 }
+
+
+class ActionPicker(QWidget):
+    """Pick an action (shortcut, media key, screenshot, app or website) and check it."""
+
+    def __init__(self, action: dict | None = None):
+        super().__init__()
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        self.kind = QComboBox()
+        for key, (text, _, _) in ACTION_TYPES.items():
+            self.kind.addItem(text, key)
+        v.addWidget(self.kind)
+        row = QHBoxLayout()
+        self.value = QLineEdit()
+        row.addWidget(self.value, 1)
+        self.browse = QPushButton("Browse…")
+        self.browse.clicked.connect(self._browse)
+        row.addWidget(self.browse)
+        v.addLayout(row)
+        self.note = label("", 8.5, MUTED)
+        self.note.setWordWrap(True)
+        v.addWidget(self.note)
+        if action:
+            self.kind.setCurrentIndex(max(0, self.kind.findData(action.get("type"))))
+            self.value.setText(action.get("value", ""))
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        self._kind_changed()
+
+    def _kind_changed(self):
+        kind = self.kind.currentData()
+        self.value.setVisible(ACTION_TYPES[kind][1])
+        self.value.setPlaceholderText(PLACEHOLDERS.get(kind, ""))
+        self.browse.setVisible(kind == "open_app")
+        notes = {
+            "open_app": "AirDesk asks you to confirm before opening it.",
+            "open_url": "AirDesk asks you to confirm before opening it.",
+            "screenshot": "Saved as a PNG in Pictures\\AirDesk.",
+            "keys": "Pressed like you typed it. Modifiers: ctrl, shift, alt, win.",
+        }
+        self.note.setText(notes.get(kind, ""))
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose an app or file")
+        if path:
+            self.value.setText(os.path.normpath(path))
+
+    def action(self) -> dict:
+        """The chosen action. Raises ValueError with a friendly message if it can't work."""
+        kind = self.kind.currentData()
+        value = self.value.text().strip()
+        if kind == "keys":
+            parse_combo(value)
+        elif kind == "open_app":
+            if not value:
+                raise ValueError("Choose the app or file to open.")
+            looks_like_path = os.sep in value or "/" in value
+            if looks_like_path and not os.path.exists(value):
+                raise ValueError("I can't find that file. Use Browse… to pick it.")
+            if not looks_like_path and shutil.which(value) is None:
+                raise ValueError(f"I can't find an app called “{value}”. "
+                                 "Use Browse… to pick it.")
+        elif kind == "open_url":
+            if "://" not in value:
+                value = "https://" + value
+            if not value.startswith(("http://", "https://")) or "." not in value:
+                raise ValueError("Type a web address like https://github.com.")
+        return {"type": kind, "value": value if ACTION_TYPES[kind][1] else ""}
+
+
+class CustomiseDialog(QDialog):
+    """Change what a built-in gesture does, or how sensitive it is."""
+    saved = pyqtSignal(str, dict, str)     # gesture key, {"mode", "action"?}, level choice
+
+    def __init__(self, parent, key: str, settings: dict, level: str | None):
+        super().__init__(parent)
+        gesture, default_text, any_action = BUILTINS[key]
+        self.key = key
+        self.setWindowTitle(f"Customise: {gesture}")
+        self.setMinimumWidth(460)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 22, 24, 20)
+        v.setSpacing(10)
+        v.addWidget(label(gesture, 16, TEXT, QFont.Weight.Bold))
+
+        v.addWidget(label("What it does", 9, MUTED))
+        self.mode = QComboBox()
+        self.mode.addItem(f"{default_text} (default)", "default")
+        if key == "scroll":
+            self.mode.addItem("Volume up / down", "volume")
+        if any_action:
+            self.mode.addItem("Another action…", "custom")
+        if key != "fist":
+            self.mode.addItem("Turn off", "off")
+        self.mode.setCurrentIndex(max(0, self.mode.findData(settings.get("mode", "default"))))
+        self.mode.setEnabled(self.mode.count() > 1)
+        v.addWidget(self.mode)
+        self.picker = ActionPicker(settings.get("action"))
+        v.addWidget(self.picker)
+        notes = {
+            "fist": "The fist is the safety pause, so what it does can't be changed. "
+                    "You can change how long you hold it.",
+            "point": "Turned off, pointing won't move the cursor or the presenter laser.",
+            "drag": "Set to another action, a long pinch runs it once and never drags.",
+        }
+        self.note = label(notes.get(key, ""), 8.5, MUTED)
+        self.note.setWordWrap(True)
+        v.addWidget(self.note)
+
+        self.level = None
+        if level_key(key) in LEVELS:
+            name, choices, default = LEVELS[level_key(key)]
+            v.addWidget(label(name, 9, MUTED))
+            self.level = QComboBox()
+            for choice in choices:
+                self.level.addItem(choice + ("  (default)" if choice == default else ""), choice)
+            self.level.setCurrentIndex(max(0, self.level.findData(level or default)))
+            v.addWidget(self.level)
+
+        self.error = label("", 9.5, "#ff6b7a")
+        self.error.setWordWrap(True)
+        v.addWidget(self.error)
+        buttons = QHBoxLayout()
+        reset = QPushButton("Reset to default")
+        reset.clicked.connect(self._reset)
+        buttons.addWidget(reset)
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton("Save")
+        save.setObjectName("primary")
+        save.clicked.connect(self._save)
+        buttons.addWidget(save)
+        v.addLayout(buttons)
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self._mode_changed()
+
+    def _mode_changed(self):
+        self.picker.setVisible(self.mode.currentData() == "custom")
+        self.adjustSize()
+
+    def _reset(self):
+        self.mode.setCurrentIndex(0)
+        if self.level is not None:
+            default = LEVELS[level_key(self.key)][2]
+            self.level.setCurrentIndex(self.level.findData(default))
+
+    def _save(self):
+        mode = self.mode.currentData()
+        entry = {"mode": mode}
+        if mode == "custom":
+            try:
+                entry["action"] = self.picker.action()
+            except ValueError as e:
+                self.error.setText(str(e))
+                return
+        self.saved.emit(self.key, entry, self.level.currentData() if self.level else "")
+        self.accept()
 
 
 class TeachDialog(QDialog):
@@ -64,25 +225,8 @@ class TeachDialog(QDialog):
         form.addWidget(self.name)
 
         form.addWidget(label("When I show it, do this", 9, MUTED))
-        self.kind = QComboBox()
-        for key, (text, _, _) in ACTION_TYPES.items():
-            self.kind.addItem(text, key)
-        form.addWidget(self.kind)
-        row = QHBoxLayout()
-        self.value = QLineEdit()
-        row.addWidget(self.value, 1)
-        self.browse = QPushButton("Browse\u2026")
-        self.browse.clicked.connect(self._browse)
-        row.addWidget(self.browse)
-        form.addLayout(row)
-        self.value_note = label("", 8.5, MUTED)
-        self.value_note.setWordWrap(True)
-        form.addWidget(self.value_note)
-        if existing:
-            self.kind.setCurrentIndex(max(0, self.kind.findData(existing["action"]["type"])))
-            self.value.setText(existing["action"].get("value", ""))
-        self.kind.currentIndexChanged.connect(self._kind_changed)
-        self._kind_changed()
+        self.picker = ActionPicker(existing["action"] if existing else None)
+        form.addWidget(self.picker)
 
         form.addSpacing(6)
         self.status = label("", 11, TEXT, QFont.Weight.DemiBold)
@@ -129,47 +273,6 @@ class TeachDialog(QDialog):
             self.progress.setValue(len(self.samples))
             self._evaluate()
         self._set_status()
-
-    # -- form ---------------------------------------------------------------
-    def _kind_changed(self):
-        kind = self.kind.currentData()
-        needs_value = ACTION_TYPES[kind][1]
-        self.value.setVisible(needs_value)
-        self.value.setPlaceholderText(PLACEHOLDERS.get(kind, ""))
-        self.browse.setVisible(kind == "open_app")
-        notes = {
-            "open_app": "AirDesk asks you to confirm before opening it.",
-            "open_url": "AirDesk asks you to confirm before opening it.",
-            "screenshot": "Saved as a PNG in Pictures\\AirDesk.",
-            "keys": "Pressed like you typed it. Modifiers: ctrl, shift, alt, win.",
-        }
-        self.value_note.setText(notes.get(kind, ""))
-
-    def _browse(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Choose an app or file")
-        if path:
-            self.value.setText(os.path.normpath(path))
-
-    def _action(self) -> dict:
-        kind = self.kind.currentData()
-        value = self.value.text().strip()
-        if kind == "keys":
-            parse_combo(value)
-        elif kind == "open_app":
-            if not value:
-                raise ValueError("Choose the app or file to open.")
-            looks_like_path = os.sep in value or "/" in value
-            if looks_like_path and not os.path.exists(value):
-                raise ValueError("I can't find that file. Use Browse\u2026 to pick it.")
-            if not looks_like_path and shutil.which(value) is None:
-                raise ValueError(f"I can't find an app called \u201c{value}\u201d. "
-                                 "Use Browse\u2026 to pick it.")
-        elif kind == "open_url":
-            if "://" not in value:
-                value = "https://" + value
-            if not value.startswith(("http://", "https://")) or "." not in value:
-                raise ValueError("Type a web address like https://github.com.")
-        return {"type": kind, "value": value if ACTION_TYPES[kind][1] else ""}
 
     # -- recording ----------------------------------------------------------
     def _start(self):
@@ -260,7 +363,7 @@ class TeachDialog(QDialog):
                 raise ValueError(f"You already have a gesture called \u201c{name}\u201d.")
             if len(self.samples) < SAMPLES_PER_GESTURE:
                 raise ValueError("Record the gesture first.")
-            action = self._action()
+            action = self.picker.action()
         except ValueError as e:
             self.error.setText(str(e))
             return

@@ -109,6 +109,11 @@ class SystemControl:
                     key = KEYS[action[1]]
                     self.keyboard.press(key)
                     self.keyboard.release(key)
+                elif kind == "volume":          # two-finger gesture set to volume
+                    key = Key.media_volume_up if action[1] > 0 else Key.media_volume_down
+                    for _ in range(min(abs(action[1]), 5)):
+                        self.keyboard.press(key)
+                        self.keyboard.release(key)
             except Exception:  # never let one failed OS call kill the tracking thread
                 log.exception("action %s failed", action)
 

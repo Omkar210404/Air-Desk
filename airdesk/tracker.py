@@ -57,6 +57,7 @@ class Frame:
 class Tracker(QThread):
     frame = pyqtSignal(object)
     custom = pyqtSignal(str)                # a taught gesture fired
+    builtin = pyqtSignal(str)               # a built-in gesture mapped to a custom action fired
 
 
     def __init__(self, camera_index: int, screen: tuple[int, int]):
@@ -192,6 +193,8 @@ class Tracker(QThread):
                 for action in out.actions:
                     if action[0] == "custom":
                         self.custom.emit(action[1])
+                    elif action[0] == "builtin":
+                        self.builtin.emit(action[1])
             if not self.control_on or self.teaching:
                 self.control.release()
 

@@ -38,6 +38,34 @@ COOLDOWN = {"click": 0.20, "rclick": 0.6, "swipe": 0.9, "fist": 1.0}
 CUSTOM_HOLD_S = 0.5         # hold a taught gesture this long to fire it
 CUSTOM_COOLDOWN_S = 1.0
 
+# Built-in gestures the user can customise: key -> (gesture, default action, may run any action).
+BUILTINS = {
+    "point": ("Point with index", "Move cursor", False),
+    "click": ("Quick pinch", "Left click", True),
+    "drag": ("Pinch and hold", "Drag", True),
+    "rclick": ("Thumb on middle finger", "Right click", True),
+    "scroll": ("Two fingers up/down", "Scroll", False),
+    "swipe_left": ("Open palm swipe left", "Previous slide (\u2190 key)", True),
+    "swipe_right": ("Open palm swipe right", "Next slide (\u2192 key)", True),
+    "fist": ("Hold a fist", "Pause / resume", False),
+}
+# Sensitivity choices: setting -> (label, {choice: value}, default choice).
+# "swipe" is shared by both swipe directions.
+LEVELS = {
+    "point": ("Cursor feel", {"Smooth": (1.0, 0.006), "Balanced": (SMOOTH_MIN_CUTOFF, SMOOTH_BETA),
+                              "Fast": (2.6, 0.02)}, "Balanced"),
+    "drag": ("Hold before a drag starts", {"0.5 s": 0.5, "0.75 s": DRAG_HOLD_S, "1 s": 1.0}, "0.75 s"),
+    "scroll": ("Speed (scroll or volume)", {"Slow": 0.05, "Normal": SCROLL_STEP, "Fast": 0.02}, "Normal"),
+    "swipe": ("Swipe length (both directions)", {"Short": 0.14, "Normal": SWIPE_DIST,
+                                                 "Long": 0.28}, "Normal"),
+    "fist": ("Hold time", {"0.4 s": 0.4, "0.6 s": FIST_HOLD_S, "1 s": 1.0}, "0.6 s"),
+}
+
+
+def level_key(key: str) -> str:
+    return "swipe" if key.startswith("swipe") else key
+
+
 FINGERS = {"index": (6, 8), "middle": (10, 12), "ring": (14, 16), "pinky": (18, 20)}
 
 # Pairs of landmark ids that make up the hand skeleton (MediaPipe layout).
@@ -137,6 +165,11 @@ class GestureEngine:
     def __init__(self, screen_w: int, screen_h: int):
         self.sw, self.sh = screen_w, screen_h
         self.filter = OneEuro(SMOOTH_MIN_CUTOFF, SMOOTH_BETA)
+        # What each built-in does: "default", "off", "custom" (the UI runs a mapped action)
+        # or, for scroll only, "volume".
+        self.modes = {k: "default" for k in BUILTINS}
+        self.drag_hold, self.scroll_step = DRAG_HOLD_S, SCROLL_STEP
+        self.swipe_dist, self.fist_hold = SWIPE_DIST, FIST_HOLD_S
         self.paused = False
         self.presenter = False     # pointing drives a laser dot; no clicks or scrolling
         self.cursor = None
@@ -148,6 +181,31 @@ class GestureEngine:
         self._held_out = Output()
         self.reset_hand()
 
+    def configure(self, builtins: dict):
+        """Apply the user's built-in gesture settings from the config file."""
+        for key in BUILTINS:
+            mode = builtins.get(key, {}).get("mode", "default")
+            self.modes[key] = "default" if key == "fist" else mode   # fist stays the safety pause
+
+        def value(setting):
+            _, choices, default = LEVELS[setting]
+            return choices.get(builtins.get(setting, {}).get("level", default), choices[default])
+
+        self.filter.min_cutoff, self.filter.beta = value("point")
+        self.drag_hold = value("drag")
+        self.scroll_step = value("scroll")
+        self.swipe_dist = value("swipe")
+        self.fist_hold = value("fist")
+
+    def _emit(self, key: str, default: tuple, event: str, out: Output):
+        """Run a built-in gesture's default action, its custom mapping, or nothing."""
+        mode = self.modes[key]
+        if mode == "default":
+            out.actions.append(default)
+            out.event = event
+        elif mode == "custom":
+            out.actions.append(("builtin", key))
+
     # -- helpers ------------------------------------------------------------
     def reset_hand(self):
         self.hand_since = None
@@ -158,6 +216,7 @@ class GestureEngine:
         self.block_pinch = False
         self.rclick_fired = False
         self.rpinch_since = None
+        self.long_fired = False
         self.pinch_off_since = None
         self.rpinch_off_since = None
         self.scroll_ref = None
@@ -262,8 +321,8 @@ class GestureEngine:
             if self.fist_since is None:
                 self.fist_since = t
             held = t - self.fist_since
-            out.hold = _clip01(held / FIST_HOLD_S) if not self.fist_latched else 0.0
-            if enabled and not self.fist_latched and held >= FIST_HOLD_S and self._ready("fist", t):
+            out.hold = _clip01(held / self.fist_hold) if not self.fist_latched else 0.0
+            if enabled and not self.fist_latched and held >= self.fist_hold and self._ready("fist", t):
                 self.paused = not self.paused
                 self.fist_latched = True
                 out.event = "Paused" if self.paused else "Resumed"
@@ -335,7 +394,7 @@ class GestureEngine:
 
         # Cursor (or laser) follows the index tip while pointing, not while closing a pinch.
         if (not move and h.ext["index"] > 0.5 and label in ("Point", "Hand")
-                and h.pinch > PINCH_NEAR):
+                and h.pinch > PINCH_NEAR and self.modes["point"] != "off"):
             move = True
 
         if move and self.presenter:
@@ -363,8 +422,7 @@ class GestureEngine:
                 self.rpinch_since = t
             if (not self.rclick_fired and t - self.rpinch_since >= MIN_PINCH_S
                     and self._ready("rclick", t)):
-                out.actions.append(("rclick",))
-                out.event = "Right click"
+                self._emit("rclick", ("rclick",), "Right click", out)
                 self.rclick_fired = True
             self.block_pinch = True        # don't turn the release into a left click
             self.pinch_since = None
@@ -386,12 +444,17 @@ class GestureEngine:
         if (self.pinch_on and not self.rpinch_on and not self.block_pinch) or holding:
             if self.pinch_since is None:
                 self.pinch_since = t
-            if not self.dragging and self.pinch_on and t - self.pinch_since >= DRAG_HOLD_S:
+            long_press = (self.pinch_on and not self.dragging and not self.long_fired
+                          and t - self.pinch_since >= self.drag_hold)
+            if long_press and self.modes["drag"] == "default":
                 out.actions.append(("down",))
                 out.event = "Drag"
                 self.dragging = True
                 anchor = self.cursor if self.cursor is not None else target
                 self.drag_offset = anchor - target
+            elif long_press:              # drag is off or mapped: fire once, never click
+                self._emit("drag", ("down",), "", out)
+                self.long_fired = True
             if self.dragging:
                 out.label = "Drag"
         elif self.pinch_since is not None:
@@ -399,23 +462,27 @@ class GestureEngine:
                 out.actions.append(("up",))
                 out.event = "Drop"
                 self.dragging = False
-            elif self.pinch_off_since - self.pinch_since >= MIN_PINCH_S and self._ready("click", t):
-                out.actions.append(("click",))
-                out.event = "Click"
+            elif (not self.long_fired and self.pinch_off_since - self.pinch_since >= MIN_PINCH_S
+                    and self._ready("click", t)):
+                self._emit("click", ("click",), "Click", out)
             self.pinch_since = None
+            self.long_fired = False
         if not self.pinch_on and not self.rpinch_on:
             self.block_pinch = False
 
         # Scroll: two fingers up, move the hand up or down.
-        if label == "Two fingers":
+        if label == "Two fingers" and self.modes["scroll"] != "off":
             y = (h.pts[8][1] + h.pts[12][1]) / 2
             if self.scroll_ref is None:
                 self.scroll_ref = y
-            steps = int((self.scroll_ref - y) / SCROLL_STEP)
-            if steps:
+            steps = int((self.scroll_ref - y) / self.scroll_step)
+            if steps and self.modes["scroll"] == "volume":
+                out.actions.append(("volume", steps))
+                out.event = "Volume up" if steps > 0 else "Volume down"
+            elif steps:
                 out.actions.append(("scroll", steps))
                 out.event = "Scroll up" if steps > 0 else "Scroll down"
-                self.scroll_ref -= steps * SCROLL_STEP
+            self.scroll_ref -= steps * self.scroll_step
         else:
             self.scroll_ref = None
         return self.dragging
@@ -429,10 +496,11 @@ class GestureEngine:
                 self.palm_hist.popleft()
             t0, x0, y0 = self.palm_hist[0]
             dx, dy = h.palm[0] - x0, h.palm[1] - y0
-            if abs(dx) > SWIPE_DIST and abs(dx) > 2 * abs(dy) and self._ready("swipe", t):
-                right = dx > 0
-                out.actions.append(("key", "right" if right else "left"))
-                out.event = "Next slide  →" if right else "←  Previous slide"
+            if abs(dx) > self.swipe_dist and abs(dx) > 2 * abs(dy) and self._ready("swipe", t):
+                if dx > 0:
+                    self._emit("swipe_right", ("key", "right"), "Next slide  →", out)
+                else:
+                    self._emit("swipe_left", ("key", "left"), "←  Previous slide", out)
                 self.palm_hist.clear()
         elif t - self.last_open > 0.15:     # tolerate a frame or two of motion blur
             self.palm_hist.clear()

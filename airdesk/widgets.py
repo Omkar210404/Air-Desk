@@ -382,11 +382,17 @@ class PresenterHints(Overlay):
         super().__init__()
         self.state = "off"
         self.event, self.event_t = "", 0.0
+        self.items = list(PRESENTER_HINTS)
         self.resize(980, 190)
 
     def place(self):
         g = QGuiApplication.primaryScreen().availableGeometry()
         self.move(g.center().x() - self.width() // 2, g.bottom() - self.height() - 24)
+
+    def set_hints(self, items: list):
+        """[(gesture, what it does), ...] — follows the user's customisations."""
+        self.items = items
+        self.update()
 
     def set_state(self, state: str, event: str = ""):
         changed = state != self.state
@@ -414,8 +420,8 @@ class PresenterHints(Overlay):
         p.drawText(QRectF(bar.left() + 50, bar.top(), 110, bar.height()),
                    Qt.AlignmentFlag.AlignVCenter, STATE_NAMES[self.state])
 
-        cell_w = (bar.width() - 170) / len(PRESENTER_HINTS)
-        for i, (gesture, action) in enumerate(PRESENTER_HINTS):
+        cell_w = (bar.width() - 170) / len(self.items)
+        for i, (gesture, action) in enumerate(self.items):
             r = QRectF(bar.left() + 160 + i * cell_w, bar.top() + 14, cell_w, bar.height() - 28)
             p.setPen(QColor(TEXT))
             p.setFont(font(15, QFont.Weight.DemiBold))

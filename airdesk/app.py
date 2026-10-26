@@ -9,26 +9,37 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QFont, QGuiApplication, QKeySequence, QShortcut
-from PyQt6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QMainWindow,
+from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QMainWindow,
                              QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from .control import ACTION_TYPES, HOTKEY_LABEL, Hotkey, SystemControl, describe, screen_size
 from .custom import CONFIG_FILE, CustomModel, holdout_check, load_config, save_config
-from .teach import TeachDialog
+from .gestures import BUILTINS, LEVELS, level_key
+from .teach import CustomiseDialog, TeachDialog
 from .tracker import Frame, Tracker
 from .widgets import (MUTED, STATE_COLORS, STYLE, TEXT, ConfidenceBar, LaserDot,
                       PresenterHints, StatePill, StatusIndicator, VideoView, card, font, label,
                       to_logical)
 
-CHEATSHEET = [
-    ("Point with index", "Move cursor"),
-    ("Quick pinch", "Left click"),
-    ("Pinch and hold", "Drag"),
-    ("Thumb + middle finger", "Right click"),
-    ("Two fingers up/down", "Scroll"),
-    ("Open palm swipe", "Prev / next slide"),
-    ("Hold a fist", "Pause / resume"),
-]
+
+def builtin_text(key: str, builtins: dict, with_level: bool = True) -> str:
+    """What a built-in gesture currently does, for the panel and presenter hints."""
+    entry = builtins.get(key, {})
+    mode = entry.get("mode", "default")
+    if mode == "off":
+        return "Off"
+    if mode == "volume":
+        text = "Volume up / down"
+    elif mode == "custom" and entry.get("action"):
+        text = describe(entry["action"])
+    else:
+        text = BUILTINS[key][1]
+    lk = level_key(key)
+    if with_level and lk in LEVELS:
+        chosen = builtins.get(lk, {}).get("level")
+        if chosen and chosen != LEVELS[lk][2]:
+            text += f" · {chosen}"
+    return text
 
 
 def subtitle(status: str, control_on: bool, hand: bool, teaching: bool, presenter: bool) -> str:
@@ -88,6 +99,7 @@ class MainWindow(QMainWindow):
         self.tracker = Tracker(camera_index, screen_size())
         self.tracker.frame.connect(self.on_frame)
         self.tracker.custom.connect(self.run_gesture)
+        self.tracker.builtin.connect(self.run_builtin)
         self._reload_gestures()
         self.tracker.start()
 
@@ -163,16 +175,9 @@ class MainWindow(QMainWindow):
         v.addWidget(mine)
 
         c = card()
-        grid = QGridLayout(c)
-        grid.setContentsMargins(18, 14, 18, 14)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(7)
-        grid.addWidget(label("BUILT-IN GESTURES", 8.5, MUTED, QFont.Weight.DemiBold), 0, 0, 1, 2)
-        for i, (gesture, action) in enumerate(CHEATSHEET, start=1):
-            grid.addWidget(label(gesture, 9.5, TEXT), i, 0)
-            a = label(action, 9.5, MUTED)
-            a.setAlignment(Qt.AlignmentFlag.AlignRight)
-            grid.addWidget(a, i, 1)
+        self.builtin_box = QVBoxLayout(c)
+        self.builtin_box.setContentsMargins(18, 14, 12, 14)
+        self.builtin_box.setSpacing(6)
         v.addWidget(c)
         v.addStretch(1)
         self.stats = label("", 8.5, MUTED)
@@ -212,6 +217,24 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         self.mine.addWidget(note)
 
+    def _fill_builtin_list(self):
+        self._clear(self.builtin_box)
+        self.builtin_box.addWidget(label("BUILT-IN GESTURES", 8.5, MUTED, QFont.Weight.DemiBold))
+        builtins = self.config.get("builtins", {})
+        for key, (gesture, _, _) in BUILTINS.items():
+            row = QHBoxLayout()
+            text = QVBoxLayout()
+            text.setSpacing(0)
+            text.addWidget(label(gesture, 9.5, TEXT))
+            text.addWidget(label(builtin_text(key, builtins), 8.5, MUTED))
+            row.addLayout(text, 1)
+            b = QPushButton("Customise")
+            b.setObjectName("flat")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self.open_customise(k))
+            row.addWidget(b)
+            self.builtin_box.addLayout(row)
+
     def _clear(self, layout):
         while layout.count():
             item = layout.takeAt(0)
@@ -225,9 +248,50 @@ class MainWindow(QMainWindow):
     # -- taught gestures ----------------------------------------------------
     def _reload_gestures(self):
         gestures = self.config["gestures"]
+        builtins = self.config.get("builtins", {})
         self.tracker.custom_model = CustomModel.from_gestures(gestures)
+        self.tracker.engine.configure(builtins)
         check = holdout_check(gestures) if gestures else {"per": {}}
         self._fill_gesture_list(check)
+        self._fill_builtin_list()
+        self.hints.set_hints([
+            ("Swipe right", builtin_text("swipe_right", builtins, with_level=False)),
+            ("Swipe left", builtin_text("swipe_left", builtins, with_level=False)),
+            ("Point", "Off" if builtins.get("point", {}).get("mode") == "off" else "Laser pointer"),
+            ("Hold a fist", "Pause"),
+        ])
+
+    # -- built-in gestures --------------------------------------------------
+    def open_customise(self, key: str):
+        builtins = self.config.get("builtins", {})
+        dialog = CustomiseDialog(self, key, builtins.get(key, {}),
+                                 builtins.get(level_key(key), {}).get("level"))
+        dialog.saved.connect(self._builtin_saved)
+        dialog.exec()
+
+    def _builtin_saved(self, key: str, entry: dict, level: str):
+        builtins = self.config.setdefault("builtins", {})
+        current = builtins.setdefault(key, {})
+        current.pop("action", None)
+        current.update(entry)
+        if level:
+            builtins.setdefault(level_key(key), {})["level"] = level
+        # keep the config file tidy: drop entries that are all defaults
+        for k in list(builtins):
+            e = builtins[k]
+            if e.get("mode") == "default":
+                e.pop("mode")
+            if k in LEVELS and e.get("level") == LEVELS[k][2]:
+                e.pop("level")
+            if not e:
+                del builtins[k]
+        self._save()
+
+    def run_builtin(self, key: str):
+        """A built-in gesture mapped to another action fired."""
+        entry = self.config.get("builtins", {}).get(key, {})
+        if entry.get("action"):
+            self.run_action(BUILTINS[key][0], entry["action"])
 
     def open_teach(self, existing: dict | None):
         if self.teach is not None:
@@ -270,12 +334,15 @@ class MainWindow(QMainWindow):
     def run_gesture(self, name: str):
         """A taught gesture fired (control is ON and ACTIVE). Run its action."""
         g = next((x for x in self.config["gestures"] if x["name"] == name), None)
-        if g is None or self.confirming:
+        if g is not None:
+            self.run_action(name, g["action"])
+
+    def run_action(self, name: str, action: dict):
+        if self.confirming:
             return
-        action = g["action"]
         kind = action["type"]
         try:
-            if ACTION_TYPES[kind][2] and not self._confirm(g):
+            if ACTION_TYPES[kind][2] and not self._confirm(name, action):
                 return
             if kind == "open_url":
                 QDesktopServices.openUrl(QUrl(action["value"]))
@@ -293,12 +360,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't run that",
                                 f"“{name}” → {describe(action)} failed:\n\n{e}")
 
-    def _confirm(self, g: dict) -> bool:
+    def _confirm(self, name: str, action: dict) -> bool:
         self.confirming = True
         try:
             box = QMessageBox(QMessageBox.Icon.Question, "AirDesk",
-                              f"Your “{g['name']}” gesture wants to "
-                              f"{describe(g['action']).lower()}.\n\n{g['action']['value']}",
+                              f"Your “{name}” gesture wants to "
+                              f"{describe(action).lower()}.\n\n{action['value']}",
                               QMessageBox.StandardButton.Cancel, self)
             go = box.addButton("Open it", QMessageBox.ButtonRole.AcceptRole)
             box.setDefaultButton(QMessageBox.StandardButton.Cancel)
