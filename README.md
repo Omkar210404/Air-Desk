@@ -2,6 +2,10 @@
 
 Control your computer with hand gestures through an ordinary webcam, including gestures you teach it yourself. Everything runs on your machine: no cloud, no account, no network calls.
 
+![AirDesk demo: open palm, fist pause and resume, two-finger scroll](docs/demo.gif)
+
+*Real recording with the skeleton-only view on, so the camera image is hidden.*
+
 ## What it does
 
 - **Live view**: a mirrored webcam feed with a glowing hand skeleton, the detected gesture and a confidence bar. A **Hide camera image** switch shows only the skeleton on a dark background, so screen recordings and calls don't show you or your room.
